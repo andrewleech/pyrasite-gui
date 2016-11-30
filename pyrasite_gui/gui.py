@@ -77,6 +77,9 @@ class Process(pyrasite.PyrasiteIPC, GObject.GObject):
     A :class:`GObject.GObject` subclass that represents a Process, for use in
     the :class:`ProcessTreeStore`
     """
+    def __init__(self, pid, is_python, *args, **kwargs):
+        self.is_python = is_python
+        super(Process, self).__init__(pid, *args, **kwargs)
 
 
 class ProcessListStore(Gtk.ListStore):
@@ -84,16 +87,24 @@ class ProcessListStore(Gtk.ListStore):
 
     def __init__(self, *args):
         Gtk.ListStore.__init__(self, str, Process, Pango.Style)
+        python_procs = []
+        other_procs = []
         for process in psutil.process_iter():
             pid = process.pid
-            if pid != os.getpid():  # ignore self
+            if pid != os.getpid():
                 try:
                     if 'python' in process.name().lower() or self._check_for_python_lib(process, pid):
-                        proc = Process(pid)
-                        self.append(("%s: %s" % (pid, proc.title.strip()), proc, Pango.Style.NORMAL))
+                        proc = Process(pid, True)
+                        python_procs.append(("%s: %s" % (pid, proc.title.strip()), proc, Pango.Style.NORMAL))
+                    else:
+                        proc = Process(pid, False)
+                        other_procs.append(("%s: %s" % (pid, proc.title.strip()), proc, Pango.Style.NORMAL))
 
                 except psutil.AccessDenied:
                     pass
+        [self.append(p) for p in python_procs]
+        self.append(('------------------', None, Pango.Style.NORMAL))
+        [self.append(p) for p in other_procs]
 
     def _check_for_python_lib(self, process, pid):
         if platform.system() == 'Windows':
@@ -104,7 +115,7 @@ class ProcessListStore(Gtk.ListStore):
                 for fhandle in win32process.EnumProcessModules(handle):
                     if 'python' in win32process.GetModuleFileNameEx(handle, fhandle).lower():
                         return True
-            except:  # Can't inspect process, ignore
+            except Exception as ex:
                 pass
         else:
             open_files = process.open_files()
@@ -615,25 +626,26 @@ class PyrasiteWindow(Gtk.Window):
         self.generate_description(title)
 
         # Inject a reverse subshell
-        self.update_progress(0.2, "Injecting reverse connection")
-        if proc.title not in self.processes:
-            proc.connect()
-            self.processes[proc.title] = proc
+        if proc.is_python:
+            self.update_progress(0.2, "Injecting reverse connection")
+            if proc.title not in self.processes:
+                proc.connect()
+                self.processes[proc.title] = proc
 
-        # Dump objects and load them into our store
-        self.update_progress(0.3, "Dumping all objects")
-        self.dump_objects()
+            # Dump objects and load them into our store
+            self.update_progress(0.3, "Dumping all objects")
+            self.dump_objects()
 
-        # Shell
-        self.update_progress(0.5, "Determining Python version")
-        self.shell_buffer.set_text(
-                proc.cmd('import sys; print("Python " + sys.version)'))
+            # Shell
+            self.update_progress(0.5, "Determining Python version")
+            self.shell_buffer.set_text(
+                    proc.cmd('import sys; print("Python " + sys.version)'))
 
-        # Dump stacks
-        self.dump_stacks()
+            # Dump stacks
+            self.dump_stacks()
 
-        ## Call Stack
-        self.generate_callgraph(1, True)
+            ## Call Stack
+            self.generate_callgraph(1, True)
 
         self.fontify()
         self.update_progress(1.0)
@@ -712,6 +724,16 @@ class PyrasiteWindow(Gtk.Window):
         graphviz_path = which('dot')
 
         image = os.path.join(tempfile.gettempdir(), "%d-callgraph.png" % self.proc.pid)
+
+        # out = self.proc.cmd(';'.join(('import pycallgraph',
+        #                               'from pycallgraph.output import GraphvizOutput',
+        #                               'import os',
+        #                               insert_paths,
+        #                               'os.environ["PATH"] += ";" + r"%s"' % os.environ["PATH"],
+        #                               '_output = GraphvizOutput()',
+        #                               '_output.output_file=r"%s"' % image,
+        #                               'pycallgraph._pycallgraph = pycallgraph.PyCallGraph(output=_output)',
+        #                               'pycallgraph._pycallgraph.start()')
 
         out = self.proc.cmd(';'.join(('import pycallgraph',
                                       'from pycallgraph.output import GraphvizOutput',
@@ -1186,7 +1208,6 @@ def which(cmd, mode=os.F_OK | os.X_OK, path=None):
                 if _access_check(name, mode):
                     return name
     return None
-
 
 def main():
     check_depends()
