@@ -24,7 +24,9 @@ from __future__ import division
 
 import os
 import sys
+import site
 import time
+import json
 import socket
 import psutil
 import logging
@@ -38,8 +40,10 @@ import subprocess
 from os.path import join, abspath, dirname
 from random import randrange
 try:
+    import meliae
     from meliae import loader
 except:
+    meliae, loader = None, None
     print("Unable to import meliae. Object memory analysis disabled.")
 try:
     from gi.repository import GLib, GObject, Pango, Gtk, WebKit
@@ -620,6 +624,9 @@ class PyrasiteWindow(Gtk.Window):
             proc.connect()
             self.processes[proc.title] = proc
 
+        # Add local env path and site-packages to target python path
+        self.add_paths()
+
         # Dump objects and load them into our store
         self.update_progress(0.3, "Dumping all objects")
         self.dump_objects()
@@ -639,6 +646,30 @@ class PyrasiteWindow(Gtk.Window):
         self.update_progress(1.0)
         self.progress.hide()
         self.update_progress(0.0)
+
+    def add_paths(self):
+        env_paths = []
+        for app in ['dot', 'gdb']:
+            app_path = which(app)
+            if app_path:
+                app_dir = os.path.dirname(app_path)
+                env_paths.append(os.path.abspath(app_dir))
+
+        env_paths.append('os.environ["PATH"]')
+        # env_paths_str = ','.join(['r"%s"' % os.path.abspath(p) for p in env_paths])
+        # py_paths_str = ','.join(['r"%s"' % os.path.abspath(p) for p in site.getsitepackages()])
+        env_paths_str = json.dumps(env_paths)
+        py_paths_str = json.dumps(site.getsitepackages())
+
+        cmd = ';'.join([
+            'import os, sys',
+            'os.environ["PATH"] = os.pathsep.join(%s)' % env_paths_str,
+            'sys.path.extend(%s)' % py_paths_str
+        ])
+
+        output = self.proc.cmd(cmd)
+        if output:
+            log.debug(output)
 
     def dump_objects(self):
 
