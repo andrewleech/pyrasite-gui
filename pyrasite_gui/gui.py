@@ -682,10 +682,13 @@ class PyrasiteWindow(Gtk.Window):
 
     def dump_objects(self, update_progress):
         update_progress(0, "Dumping all objects")
-        cmd = ';'.join(["import os, shutil, tempfile", "from meliae import scanner",
-                        "tmp = os.path.join(tempfile.gettempdir(), str(os.getpid()))",
-                        "scanner.dump_all_objects(tmp + '.json')",
-                        "shutil.move(tmp + '.json', tmp + '.objects')"])
+        cmd = '\n'.join(["import os, shutil, tempfile, threading",
+                         "from meliae import scanner",
+                         "tmp = os.path.join(tempfile.gettempdir(), str(os.getpid()))",
+                         "def background_dump():",
+                         "    scanner.dump_all_objects(tmp + '.json')",
+                         "    shutil.move(tmp + '.json', tmp + '.objects')",
+                         "threading.Thread(target=background_dump).start()"])
         output = self.proc.cmd(cmd)
         if 'No module named meliae' in output:
             log.error('Error: %s is unable to import `meliae`' %
@@ -698,39 +701,45 @@ class PyrasiteWindow(Gtk.Window):
         update_progress(0.5, "Loading object dump")
 
         tmp = os.path.join(tempfile.gettempdir(), str(self.proc.pid))
+        temp_file = tmp + '.json'
         objects_file = tmp + '.objects'
-        if os.path.exists(objects_file):
-            try:
-                objects = loader.load(objects_file, show_prog=False)
-            except NameError:
-                log.debug("Meliae not available, continuing...")
-                return
-            except:
-                log.debug("Falling back to slower meliae object dump loader")
-                objects = loader.load(objects_file, show_prog=False, using_json=False)
-
-            objects.compute_referrers()
-            update_progress(0.75)
-            summary = objects.summarize()
-            update_progress(0.9)
-
-            def intify(x):
-                try:
-                    return int(x)
-                except:
-                    return x
-
-            for i, line in enumerate(str(summary).split('\n')):
-                if i == 0:
-                    self.obj_totals.set_text(line)
-                elif i == 1:
-                    continue  # column headers
+        now = time.time()
+        if os.path.exists(temp_file):
+            while time.time() - now < 10*60:  # 10 minute timeout
+                if not os.path.exists(objects_file):
+                    time.sleep(3)
                 else:
-                    obj = summary.summaries[i - 2]
-                    self.obj_store.append([str(obj.max_address)] +
-                                           map(intify, line.split()[1:]))
+                    try:
+                        objects = loader.load(objects_file, show_prog=False)
+                    except NameError:
+                        log.debug("Meliae not available, continuing...")
+                        return
+                    except:
+                        log.debug("Falling back to slower meliae object dump loader")
+                        objects = loader.load(objects_file, show_prog=False, using_json=False)
 
-            os.unlink(objects_file)
+                    objects.compute_referrers()
+                    update_progress(0.75)
+                    summary = objects.summarize()
+                    update_progress(0.9)
+
+                    def intify(x):
+                        try:
+                            return int(x)
+                        except:
+                            return x
+
+                    for i, line in enumerate(str(summary).split('\n')):
+                        if i == 0:
+                            self.obj_totals.set_text(line)
+                        elif i == 1:
+                            continue  # column headers
+                        else:
+                            obj = summary.summaries[i - 2]
+                            self.obj_store.append([str(obj.max_address)] +
+                                                   map(intify, line.split()[1:]))
+                    os.unlink(objects_file)
+                    break
             update_progress(1)
 
     def dump_stacks(self, update_progress):
