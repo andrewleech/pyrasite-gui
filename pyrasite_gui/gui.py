@@ -36,7 +36,7 @@ import tempfile
 import tokenize
 import threading
 import subprocess
-
+from functools import partial
 from os.path import join, abspath, dirname
 from random import randrange
 try:
@@ -571,6 +571,12 @@ class PyrasiteWindow(Gtk.Window):
         self.info_view.execute_script(script)
         return True
 
+    def _section_progress(self, start, end, fraction, text=None):
+        self.update_progress(start + ((end - start) * fraction), text)
+
+    def section_progress(self, start, end):
+        return partial(self._section_progress, start, end)
+
     def update_progress(self, fraction, text=None):
         if text:
             self.progress.set_text(text + '...')
@@ -625,22 +631,25 @@ class PyrasiteWindow(Gtk.Window):
             self.processes[proc.title] = proc
 
         # Add local env path and site-packages to target python path
+        self.update_progress(0.25, "Injecting python paths")
         self.add_paths()
 
-        # Dump objects and load them into our store
-        self.update_progress(0.3, "Dumping all objects")
-        self.dump_objects()
-
-        # Shell
-        self.update_progress(0.5, "Determining Python version")
-        self.shell_buffer.set_text(
-                proc.cmd('import sys; print("Python " + sys.version)'))
-
         # Dump stacks
-        self.dump_stacks()
+        self.dump_stacks(self.section_progress(0.3, 0.4))
 
         ## Call Stack
-        self.generate_callgraph(1, True)
+        self.generate_callgraph(1, self.section_progress(0.45, 0.6))
+
+        # Dump objects and load them into our store
+        try:
+            self.dump_objects(self.section_progress(0.65, 0.85))
+        except socket.timeout:
+            log.info('dump_objects() timed out')
+
+        # Shell
+        self.update_progress(0.9, "Determining Python version")
+        self.shell_buffer.set_text(
+                proc.cmd('import sys; print("Python " + sys.version)'))
 
         self.fontify()
         self.update_progress(1.0)
@@ -671,8 +680,8 @@ class PyrasiteWindow(Gtk.Window):
         if output:
             log.debug(output)
 
-    def dump_objects(self):
-
+    def dump_objects(self, update_progress):
+        update_progress(0, "Dumping all objects")
         cmd = ';'.join(["import os, shutil, tempfile", "from meliae import scanner",
                         "tmp = os.path.join(tempfile.gettempdir(), str(os.getpid()))",
                         "scanner.dump_all_objects(tmp + '.json')",
@@ -682,11 +691,11 @@ class PyrasiteWindow(Gtk.Window):
             log.error('Error: %s is unable to import `meliae`' %
                       self.proc.title.strip())
             return
-        self.update_progress(0.35)
+        update_progress(0.25)
 
         # Clear previous model
         self.obj_store.clear()
-        self.update_progress(0.4, "Loading object dump")
+        update_progress(0.5, "Loading object dump")
 
         tmp = os.path.join(tempfile.gettempdir(), str(self.proc.pid))
         objects_file = tmp + '.objects'
@@ -701,9 +710,9 @@ class PyrasiteWindow(Gtk.Window):
                 objects = loader.load(objects_file, show_prog=False, using_json=False)
 
             objects.compute_referrers()
-            self.update_progress(0.45)
+            update_progress(0.75)
             summary = objects.summarize()
-            self.update_progress(0.47)
+            update_progress(0.9)
 
             def intify(x):
                 try:
@@ -722,24 +731,25 @@ class PyrasiteWindow(Gtk.Window):
                                            map(intify, line.split()[1:]))
 
             os.unlink(objects_file)
+            update_progress(1)
 
-    def dump_stacks(self):
-        self.update_progress(0.55, "Dumping stacks")
+    def dump_stacks(self, update_progress):
+        update_progress(0, "Dumping stacks")
         payloads = os.path.join(os.path.abspath(os.path.dirname(
             pyrasite.__file__)), 'payloads')
         dump_stacks = os.path.join(payloads, 'dump_stacks.py')
         code = self.proc.cmd(open(dump_stacks).read())
-        self.update_progress(0.6)
+        update_progress(1)
 
         self.source_buffer.set_text('')
         start = self.source_buffer.get_iter_at_offset(0)
         end = start.copy()
         self.source_buffer.insert(end, code)
 
-    def generate_callgraph(self, sample_size=1, show_progress=False):
-        if show_progress:
-            self.update_progress(0.7, "Tracing call stack for %d seconds" %
-                                 sample_size)
+    def generate_callgraph(self, sample_size=1, update_progress=None):
+        if update_progress:
+            update_progress(0, "Tracing call stack for %d seconds" % sample_size)
+
         graphviz_path = which('dot')
 
         image = os.path.join(tempfile.gettempdir(), "%d-callgraph.png" % self.proc.pid)
@@ -754,13 +764,13 @@ class PyrasiteWindow(Gtk.Window):
         if out:
             log.warn(out)
 
-        if show_progress:
-            self.update_progress(0.8)
+        if update_progress:
+            update_progress(0.5)
 
         time.sleep(sample_size)
 
-        if show_progress:
-            self.update_progress(0.9, "Generating call stack graph")
+        if update_progress:
+            update_progress(1.0, "Generating call stack graph")
 
         self.proc.cmd('import pycallgraph; pycallgraph._pycallgraph.done()')
         self.call_graph.set_from_file(image)
